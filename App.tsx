@@ -8,6 +8,7 @@ import StatusPanel from './components/StatusPanel';
 import OutcomeOverlay from './components/OutcomeOverlay';
 
 const App: React.FC = () => {
+  const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('detective_theme') !== 'light');
   const [gameState, setGameState] = useState<GameState>({
     phase: GamePhase.SEARCH,
     grid: [],
@@ -21,20 +22,23 @@ const App: React.FC = () => {
 
   const [outcome, setOutcome] = useState<'victory' | 'loser' | null>(null);
   const [commandInput, setCommandInput] = useState('');
-  const [lastFeedback, setLastFeedback] = useState<{ msg: string; type: 'success' | 'error' | null }>({ msg: '', type: null });
+  const [lastFeedback, setLastFeedback] = useState<{ msg: string; type: 'success' | 'error' | null; key: number }>({ msg: 'SCAN CLEAR', type: null, key: 0 });
   
   const [isMuted, setIsMuted] = useState(() => localStorage.getItem('detective_muted') === 'true');
   const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [isDucking, setIsDucking] = useState(false);
 
   const [currentTrackIndex, setCurrentTrackIndex] = useState(() => Number(localStorage.getItem('detective_track_idx')) || 0);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(() => (localStorage.getItem('detective_play_mode') as PlaybackMode) || 'repeat-all');
   const [isShuffle, setIsShuffle] = useState(() => localStorage.getItem('detective_shuffle') === 'true');
   const [isMusicPlaying, setIsMusicPlaying] = useState(false);
   const [bgmVolume, setBgmVolume] = useState(() => Number(localStorage.getItem('detective_bgm_vol')) || 50);
+  const [isSearchingMusic, setIsSearchingMusic] = useState(false);
 
-  const feedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const outcomeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const firstErrorIndexRef = useRef<number | null>(null);
   
   const bgmRef = useRef<HTMLAudioElement | null>(null);
   const sfxCorrectRef = useRef<HTMLAudioElement | null>(null);
@@ -46,6 +50,14 @@ const App: React.FC = () => {
   const gainNodeRef = useRef<GainNode | null>(null);
   const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
 
+  const skipTrackRef = useRef<(direction: 'next' | 'prev') => void>(null!);
+  const handleTrackEndedRef = useRef<() => void>(null!);
+
+  useEffect(() => {
+    document.body.className = isDarkMode ? 'theme-dark' : 'theme-light';
+    localStorage.setItem('detective_theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
   useEffect(() => {
     const createAudio = (url: string, loop = false, vol = 0.5) => {
       const audio = new Audio(url);
@@ -56,13 +68,8 @@ const App: React.FC = () => {
     };
     sfxCorrectRef.current = createAudio(`/media/sfx/${SFX_FILES.CORRECT}`, false, 0.4);
     sfxWrongRef.current = createAudio(`/media/sfx/${SFX_FILES.WRONG}`, false, 0.3);
-    sfxVictoryRef.current = createAudio(`/media/sfx/${SFX_FILES.VICTORY}`, false, 0.6);
-    sfxLoserRef.current = createAudio(`/media/sfx/${SFX_FILES.LOSER}`, false, 0.6);
-
-    return () => { 
-      bgmRef.current?.pause();
-      if (audioCtxRef.current) audioCtxRef.current.close();
-    };
+    sfxVictoryRef.current = createAudio(`/media/sfx/${SFX_FILES.VICTORY}`, false, 1.0);
+    sfxLoserRef.current = createAudio(`/media/sfx/${SFX_FILES.LOSER}`, false, 1.0);
   }, []);
 
   const initWebAudio = useCallback(() => {
@@ -72,63 +79,67 @@ const App: React.FC = () => {
       gainNodeRef.current = audioCtxRef.current.createGain();
       gainNodeRef.current.connect(audioCtxRef.current.destination);
     }
-    if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
+    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
   }, []);
+
+  useEffect(() => {
+    if (gainNodeRef.current && audioCtxRef.current) {
+      const baseGain = isMuted ? 0 : bgmVolume / 100;
+      const targetGain = isDucking ? baseGain * 0.1 : baseGain; 
+      gainNodeRef.current.gain.setTargetAtTime(targetGain, audioCtxRef.current.currentTime, 0.2);
+    }
+  }, [bgmVolume, isMuted, isDucking]);
 
   const playTrack = useCallback((index: number) => {
     initWebAudio();
     if (bgmRef.current) {
       bgmRef.current.pause();
-      if (sourceNodeRef.current) {
-        sourceNodeRef.current.disconnect();
-        sourceNodeRef.current = null;
-      }
+      bgmRef.current.onended = null;
+      bgmRef.current.onerror = null;
     }
-    
     const trackName = MUSIC_PLAYLIST[index];
     const audio = new Audio(`/media/music/${trackName}`);
-    audio.crossOrigin = "anonymous";
-    audio.muted = isMuted;
-    audio.onended = () => handleTrackEnded();
-    
+    audio.onended = () => { firstErrorIndexRef.current = null; setIsSearchingMusic(false); handleTrackEndedRef.current(); };
+    audio.onerror = () => { 
+      if (firstErrorIndexRef.current === null) firstErrorIndexRef.current = index; 
+      setIsSearchingMusic(true); 
+      skipTrackRef.current('next'); 
+    };
     if (audioCtxRef.current && gainNodeRef.current) {
+      if (sourceNodeRef.current) sourceNodeRef.current.disconnect();
       sourceNodeRef.current = audioCtxRef.current.createMediaElementSource(audio);
       sourceNodeRef.current.connect(gainNodeRef.current);
     }
-
     bgmRef.current = audio;
     setCurrentTrackIndex(index);
     localStorage.setItem('detective_track_idx', String(index));
-    
-    if (gainNodeRef.current) {
-      gainNodeRef.current.gain.value = isMuted ? 0 : bgmVolume / 100;
-    }
-
-    if (audioUnlocked && isMusicPlaying) audio.play().catch(() => {});
-  }, [audioUnlocked, isMusicPlaying, isMuted, bgmVolume, initWebAudio]);
+    if (audioUnlocked && isMusicPlaying) audio.play().then(() => { firstErrorIndexRef.current = null; setIsSearchingMusic(false); }).catch(() => {});
+  }, [audioUnlocked, isMusicPlaying, initWebAudio]);
 
   const handleTrackEnded = useCallback(() => {
     if (playbackMode === 'repeat-one') { bgmRef.current?.play(); return; }
     let nextIndex = isShuffle ? Math.floor(Math.random() * MUSIC_PLAYLIST.length) : (currentTrackIndex + 1) % MUSIC_PLAYLIST.length;
-    if (playbackMode === 'no-repeat' && nextIndex === 0) { setIsMusicPlaying(false); return; }
     playTrack(nextIndex);
   }, [playbackMode, isShuffle, currentTrackIndex, playTrack]);
 
   const skipTrack = useCallback((direction: 'next' | 'prev') => {
     let nextIndex;
-    if (isShuffle) {
-      nextIndex = Math.floor(Math.random() * MUSIC_PLAYLIST.length);
-    } else {
-      if (direction === 'next') {
-        nextIndex = (currentTrackIndex + 1) % MUSIC_PLAYLIST.length;
-      } else {
-        nextIndex = (currentTrackIndex - 1 + MUSIC_PLAYLIST.length) % MUSIC_PLAYLIST.length;
-      }
+    if (isShuffle) nextIndex = Math.floor(Math.random() * MUSIC_PLAYLIST.length);
+    else {
+      if (direction === 'next') nextIndex = (currentTrackIndex + 1) % MUSIC_PLAYLIST.length;
+      else nextIndex = (currentTrackIndex - 1 + MUSIC_PLAYLIST.length) % MUSIC_PLAYLIST.length;
     }
-    playTrack(nextIndex);
+    if (firstErrorIndexRef.current !== null && nextIndex === firstErrorIndexRef.current) {
+      setIsMusicPlaying(false); setIsSearchingMusic(false); firstErrorIndexRef.current = null; return;
+    }
+    if (skipThrottleRef.current) clearTimeout(skipThrottleRef.current);
+    skipThrottleRef.current = setTimeout(() => playTrack(nextIndex), firstErrorIndexRef.current !== null ? 10 : 0);
   }, [currentTrackIndex, isShuffle, playTrack]);
+
+  useEffect(() => {
+    skipTrackRef.current = skipTrack;
+    handleTrackEndedRef.current = handleTrackEnded;
+  }, [skipTrack, handleTrackEnded]);
 
   const playSFX = (type: 'correct' | 'wrong' | 'victory' | 'loser') => {
     if (isMuted || !audioUnlocked) return;
@@ -137,7 +148,6 @@ const App: React.FC = () => {
     else if (type === 'wrong') sound = sfxWrongRef.current;
     else if (type === 'victory') sound = sfxVictoryRef.current;
     else if (type === 'loser') sound = sfxLoserRef.current;
-    
     if (sound) { sound.currentTime = 0; sound.play().catch(() => {}); }
   };
 
@@ -160,174 +170,146 @@ const App: React.FC = () => {
         placed++;
       }
     }
-    // Fix: Added missing totalAnomalies property to satisfy GameState interface
-    setGameState({ 
-      phase: GamePhase.SEARCH, 
-      grid: newGrid, 
-      foundCount: 0, 
-      foundIds: [], 
-      totalAnomalies: TOTAL_ANOMALIES,
-      timeLeft: SEARCH_DURATION, 
-      bgChar: pair.bg, 
-      anomalyChar: pair.anomaly 
-    });
-    setOutcome(null);
-    setLastFeedback({ msg: 'READY TO SCAN', type: null });
+    setGameState({ phase: GamePhase.SEARCH, grid: newGrid, foundCount: 0, foundIds: [], totalAnomalies: TOTAL_ANOMALIES, timeLeft: SEARCH_DURATION, bgChar: pair.bg, anomalyChar: pair.anomaly });
+    setOutcome(null); 
+    setLastFeedback({ msg: 'SCAN CLEAR', type: null, key: Date.now() });
   }, []);
 
   const triggerOutcome = useCallback((type: 'victory' | 'loser') => {
-    setOutcome(type);
-    playSFX(type);
-    
-    // Matikan timer utama saat popup muncul
+    setOutcome(type); setIsDucking(true); playSFX(type);
     if (timerRef.current) clearInterval(timerRef.current);
-
-    if (outcomeTimerRef.current) clearTimeout(outcomeTimerRef.current);
     outcomeTimerRef.current = setTimeout(() => {
-      setOutcome(null);
-      // Pindah ke fase REVEAL setelah popup 5 detik selesai
-      setGameState(prev => ({ ...prev, phase: GamePhase.REVEAL, timeLeft: REVEAL_DURATION }));
-    }, 5000);
+      setOutcome(null); setGameState(prev => ({ ...prev, phase: GamePhase.REVEAL, timeLeft: REVEAL_DURATION }));
+      setIsDucking(false);
+    }, 6000);
   }, [playSFX]);
 
-  const startSurrender = useCallback(() => { 
-    if (gameState.phase === GamePhase.SEARCH) {
-      triggerOutcome('loser');
-    }
-  }, [gameState.phase, triggerOutcome]);
-
-  // Main Timer Effect
   useEffect(() => {
-    // Generate grid jika kosong
     if (gameState.grid.length === 0) generateLevel();
-
-    // Jalankan timer hanya jika tidak ada outcome popup
     if (!outcome) {
       timerRef.current = setInterval(() => {
         setGameState(prev => {
           if (prev.timeLeft <= 1) {
-            //SEARCH habis -> LOSER popup -> REVEAL
-            if (prev.phase === GamePhase.SEARCH) {
-              triggerOutcome('loser');
-              return { ...prev, timeLeft: 0 };
-            }
-            //REVEAL habis -> Reset ke SEARCH level baru
-            if (prev.phase === GamePhase.REVEAL) {
-              generateLevel();
-              return prev; // generateLevel akan set state baru
-            }
-            return { ...prev, timeLeft: 0 };
+            if (prev.phase === GamePhase.SEARCH) { triggerOutcome('loser'); return { ...prev, timeLeft: 0 }; }
+            if (prev.phase === GamePhase.REVEAL) { generateLevel(); return prev; }
           }
           return { ...prev, timeLeft: prev.timeLeft - 1 };
         });
       }, 1000);
     }
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [outcome, generateLevel, triggerOutcome, gameState.grid.length]);
 
   const processDetection = (id: string) => {
     if (gameState.phase !== GamePhase.SEARCH || outcome) return;
-    const targetId = id.toUpperCase();
+    const targetId = id.toUpperCase().trim();
     setGameState(prev => {
       const cell = prev.grid.find(c => c.id === targetId);
-      if (!cell || cell.isFound) { playSFX('wrong'); showFeedback(cell ? "DUPLICATE" : "ERROR COORD", "error"); return prev; }
+      if (!cell || cell.isFound) { 
+        playSFX('wrong'); 
+        setLastFeedback({ msg: 'COORDINATE INVALID', type: 'error', key: Date.now() });
+        return prev; 
+      }
       if (cell.isAnomaly) { 
         playSFX('correct'); 
-        showFeedback("ANOMALY FOUND!", "success"); 
-        const newFoundCount = prev.foundCount + 1;
-        
+        setLastFeedback({ msg: 'ANOMALY DETECTED', type: 'success', key: Date.now() });
         const updatedGrid = prev.grid.map(c => c.id === targetId ? { ...c, isFound: true } : c);
-        const updatedIds = [...prev.foundIds, targetId];
-
-        if (newFoundCount === TOTAL_ANOMALIES) {
-          // Gunakan timeout sedikit agar state update terakhir terlihat sebelum triggerOutcome (yang menghentikan timer)
-          setTimeout(() => triggerOutcome('victory'), 100);
-        }
-
-        return { 
-          ...prev, 
-          grid: updatedGrid, 
-          foundCount: newFoundCount,
-          foundIds: updatedIds
-        }; 
+        const newCount = prev.foundCount + 1;
+        if (newCount === TOTAL_ANOMALIES) setTimeout(() => triggerOutcome('victory'), 100);
+        return { ...prev, grid: updatedGrid, foundCount: newCount, foundIds: [...prev.foundIds, targetId] }; 
       }
-      else { playSFX('wrong'); showFeedback("SCAN CLEAR", "error"); return prev; }
+      else { 
+        playSFX('wrong'); 
+        setLastFeedback({ msg: 'SCAN NEGATIVE', type: 'error', key: Date.now() });
+        return prev; 
+      }
     });
   };
 
-  const showFeedback = (msg: string, type: 'success' | 'error') => {
-    if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
-    setLastFeedback({ msg, type });
-    feedbackTimeoutRef.current = setTimeout(() => setLastFeedback(f => ({ ...f, type: null })), 2500);
-  };
-
-  const handleInteraction = () => {
-    if(!audioUnlocked) {
-      setAudioUnlocked(true);
-      setIsMusicPlaying(true);
-      initWebAudio();
+  const handleGlobalUnlock = () => {
+    if(!audioUnlocked) { 
+      setAudioUnlocked(true); 
+      setIsMusicPlaying(true); 
+      initWebAudio(); 
+      if (!bgmRef.current) playTrack(currentTrackIndex); 
     }
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col items-center bg-slate-950 text-slate-50 select-none overflow-hidden" onClick={handleInteraction}>
-      <div className="w-full flex-none bg-gradient-to-r from-emerald-600 to-cyan-700 py-1.5 px-4 flex items-center justify-center border-b border-emerald-400/20 shadow-lg z-50 animate-gradient-x">
-        <p className="text-[10px] sm:text-xs md:text-sm font-black text-white uppercase tracking-widest drop-shadow-md text-center">
-          Himbauan: Bagi yang mau komentar dan mau jawab, SUBSCRIBE dulu!
+    <div className={`h-screen w-screen flex flex-col items-center select-none overflow-hidden transition-colors ${isDarkMode ? 'bg-[#020617] text-slate-100' : 'bg-slate-100 text-slate-900'}`} 
+         onClick={handleGlobalUnlock}>
+      
+      {/* BARIS 1: Banner Himbauan */}
+      <div className="w-full h-7 sm:h-8 bg-[#009688] flex items-center justify-center z-[60] shadow-md border-b border-black/20 flex-none">
+        <p className="text-white text-[9px] sm:text-[14px] font-black uppercase tracking-widest px-4 text-center">
+          HIMBAUAN: BAGI YANG MAU KOMENTAR DAN MAU JAWAB, SUBSCRIBE DULU!
         </p>
       </div>
 
       <div className="flex-1 w-full flex flex-col min-h-0 overflow-hidden relative">
         {outcome && <OutcomeOverlay type={outcome} />}
         
+        {/* BARIS 2: Header (Logo, Centered Music Player, Timer, Surrender) */}
         <Header 
-          phase={gameState.phase} 
-          timeLeft={gameState.timeLeft}
-          onRevealNow={startSurrender}
-          isMuted={isMuted}
-          onToggleMute={() => setIsMuted(!isMuted)}
-          audioUnlocked={audioUnlocked}
-          isMusicPlaying={isMusicPlaying}
-          onToggleBgm={() => setIsMusicPlaying(!isMusicPlaying)}
-          playbackMode={playbackMode}
-          onCycleMode={() => {
-            const modes: PlaybackMode[] = ['no-repeat', 'repeat-all', 'repeat-one'];
-            setPlaybackMode(modes[(modes.indexOf(playbackMode) + 1) % modes.length]);
+          phase={gameState.phase} timeLeft={gameState.timeLeft} onRevealNow={() => triggerOutcome('loser')}
+          isMuted={isMuted} onToggleMute={() => setIsMuted(!isMuted)}
+          audioUnlocked={audioUnlocked} isMusicPlaying={isMusicPlaying} onToggleBgm={() => { handleGlobalUnlock(); setIsMusicPlaying(!isMusicPlaying); }}
+          playbackMode={playbackMode} onCycleMode={() => {
+            const next = (['no-repeat', 'repeat-all', 'repeat-one'] as PlaybackMode[])[(['no-repeat', 'repeat-all', 'repeat-one'].indexOf(playbackMode) + 1) % 3];
+            setPlaybackMode(next); localStorage.setItem('detective_play_mode', next);
           }}
-          isShuffle={isShuffle}
-          onToggleShuffle={() => setIsShuffle(!isShuffle)}
-          onNext={() => skipTrack('next')}
-          onPrev={() => skipTrack('prev')}
-          currentTrackName={MUSIC_PLAYLIST[currentTrackIndex]}
-          bgmVolume={bgmVolume}
-          onVolumeChange={setBgmVolume}
+          isShuffle={isShuffle} onToggleShuffle={() => setIsShuffle(!isShuffle)}
+          onNext={() => skipTrack('next')} onPrev={() => skipTrack('prev')}
+          currentTrackName={isSearchingMusic ? "SCANNING MEDIA..." : MUSIC_PLAYLIST[currentTrackIndex]}
+          bgmVolume={bgmVolume} onVolumeChange={(v) => { setBgmVolume(v); localStorage.setItem('detective_bgm_vol', String(v)); }}
           lastFeedback={lastFeedback}
+          isDarkMode={isDarkMode} onToggleTheme={() => setIsDarkMode(!isDarkMode)}
         />
         
-        <main className="flex-1 w-full max-w-[1800px] mx-auto flex flex-col items-center justify-start min-h-0 overflow-hidden p-1 sm:p-2">
-          <div className="w-full flex flex-col sm:flex-row items-center gap-2 sm:gap-4 mb-2">
-            <form onSubmit={(e) => { e.preventDefault(); if (commandInput) processDetection(commandInput); setCommandInput(''); }} className="flex-none flex items-center bg-slate-900 border border-slate-700 rounded overflow-hidden shadow-2xl">
-              <input 
-                type="text"
-                value={commandInput}
-                onChange={(e) => setCommandInput(e.target.value)}
-                placeholder="COORD"
-                className="bg-transparent text-emerald-400 font-mono font-bold text-xs px-3 py-2 outline-none w-28 sm:w-36 uppercase placeholder:text-slate-800"
-              />
-              <button type="submit" className="bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-500 text-[10px] font-black px-5 h-full border-l border-slate-700 transition-all uppercase">Scan</button>
-            </form>
+        <main className="flex-1 w-full flex flex-col items-center justify-start min-h-0 overflow-hidden px-1 sm:px-4 py-1 sm:py-2 gap-2 sm:gap-4">
+          
+          {/* BARIS 3: Status Feedback + Coord Scan */}
+          <div className="w-full flex flex-col sm:flex-row items-center justify-center sm:justify-between gap-2 max-w-[1700px] flex-none">
+             {/* Feedback Row (Mobile Row 3 Part A) */}
+             <div key={lastFeedback.key} className={`flex-1 text-center sm:text-left ${lastFeedback.type === 'error' ? 'animate-error' : ''}`}>
+                <h2 className={`text-xl sm:text-5xl font-black uppercase tracking-widest transition-all duration-300 ${lastFeedback.type === 'error' ? 'text-red-500' : lastFeedback.type === 'success' ? 'text-[#00cba9]' : 'text-slate-500 sm:opacity-20'}`}>
+                   {lastFeedback.msg}
+                </h2>
+             </div>
 
-            <div className="flex-1 flex justify-center">
-              <StatusPanel foundIds={gameState.foundIds} total={TOTAL_ANOMALIES} phase={gameState.phase} />
-            </div>
+             {/* Coord Input Row (Mobile Row 3 Part B) */}
+             <div className="flex items-center gap-2 justify-center flex-none">
+                <form onSubmit={(e) => { e.preventDefault(); if (commandInput) processDetection(commandInput); setCommandInput(''); }} 
+                      className={`flex items-center rounded overflow-hidden border ${isDarkMode ? 'bg-[#0f172a] border-slate-700' : 'bg-white border-slate-300'} shadow-xl`}>
+                  <div className="px-2 sm:px-3 py-1.5 sm:py-2 text-[8px] sm:text-[10px] font-black uppercase text-slate-500 border-r border-slate-800">COORD</div>
+                  <input 
+                    type="text" value={commandInput} onChange={(e) => setCommandInput(e.target.value)}
+                    className={`bg-transparent font-mono font-black text-xs sm:text-sm px-2 sm:px-3 py-1.5 sm:py-2 outline-none w-20 sm:w-28 uppercase ${isDarkMode ? 'text-[#00cba9]' : 'text-slate-900'}`}
+                  />
+                  <button type="submit" className={`bg-[#00cba9] text-[#020617] text-[8px] sm:text-[10px] font-black px-3 sm:px-4 py-1.5 sm:py-2 h-full transition-all uppercase hover:brightness-110 active:scale-95`}>SCAN</button>
+                </form>
+             </div>
           </div>
 
-          <div className="flex-1 w-full bg-slate-900/40 rounded-lg border border-slate-900/50 p-0.5 overflow-hidden flex flex-col min-h-0 shadow-inner">
-            <GameGrid grid={gameState.grid} phase={gameState.phase} onCellClick={processDetection} />
+          {/* BARIS 4 & 5 (Solved Index & Total Status) are contained in StatusPanel */}
+          <div className="w-full max-w-[1700px] flex-none">
+            <StatusPanel foundIds={gameState.foundIds} total={TOTAL_ANOMALIES} phase={gameState.phase} isDarkMode={isDarkMode} />
           </div>
+
+          {/* BARIS 6: Game Grid */}
+          <div className={`flex-1 w-full max-w-[1700px] rounded border overflow-hidden flex flex-col min-h-0 ${isDarkMode ? 'bg-[#020617] border-[#1e293b]' : 'bg-white border-slate-300'}`}>
+            <GameGrid grid={gameState.grid} phase={gameState.phase} onCellClick={processDetection} isDarkMode={isDarkMode} />
+          </div>
+
+          {/* BARIS 7: Footer Reset Instruksi */}
+          <footer className="w-full py-1 sm:py-2 border-t border-slate-800/30 bg-black/20 flex flex-col items-center justify-center flex-none text-center">
+             <p className="text-[7px] sm:text-[9px] font-bold text-slate-500 uppercase tracking-widest leading-none">
+                CARA MERESET: HAPUS CACHE DAN COOKIE WEB INI DARI BROWSER ANDA
+             </p>
+             <p className="text-[6px] sm:text-[8px] text-slate-700 mt-1 uppercase">
+                SYSTEM VER. 2.5 // COORD PRO SECURITY PROTOCOL ACTIVE
+             </p>
+          </footer>
         </main>
       </div>
     </div>

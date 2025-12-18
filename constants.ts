@@ -5,10 +5,12 @@ export const TOTAL_ANOMALIES = 15;
 export const SEARCH_DURATION = 600; 
 export const REVEAL_DURATION = 30; 
 
+// Daftar 20 slot musik. Silakan ganti nama file di bawah sesuai koleksi Anda.
 export const MUSIC_PLAYLIST = [
-  'bgm1.mp3',
-  'bgm2.mp3',
-  'bgm3.mp3'
+  "track1.mp3", "track2.mp3", "track3.mp3", "track4.mp3", "track5.mp3",
+  "track6.mp3", "track7.mp3", "track8.mp3", "track9.mp3", "track10.mp3",
+  "bgm1.mp3", "bgm2.mp3", "bgm3.mp3", "bgm4.mp3", "bgm5.mp3",
+  "musik1.mp3", "musik2.mp3", "musik3.mp3", "musik4.mp3", "musik5.mp3"
 ];
 
 export const SFX_FILES = {
