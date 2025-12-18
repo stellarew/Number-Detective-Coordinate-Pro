@@ -26,7 +26,7 @@ const GameGrid: React.FC<GameGridProps> = ({ grid, phase, onCellClick }) => {
       {COLS.map(col => (
         <div 
           key={col} 
-          className="flex items-center justify-center font-black text-slate-700 text-[7px] sm:text-[9px] md:text-[11px] uppercase border-b border-slate-800/40 h-3 sm:h-5"
+          className="flex items-center justify-center font-black text-slate-500 text-[7px] sm:text-[9px] md:text-[11px] uppercase border-b border-slate-800/40 h-3 sm:h-5 bg-slate-900/30"
         >
           {col}
         </div>
@@ -36,7 +36,7 @@ const GameGrid: React.FC<GameGridProps> = ({ grid, phase, onCellClick }) => {
       {ROWS.map(rowNum => (
         <React.Fragment key={rowNum}>
           {/* Side Label 1-24 */}
-          <div className="flex items-center justify-center font-black text-slate-700 text-[7px] sm:text-[9px] md:text-[11px] bg-slate-950/20 border-r border-slate-800/40">
+          <div className="flex items-center justify-center font-black text-slate-500 text-[7px] sm:text-[9px] md:text-[11px] bg-slate-950/20 border-r border-slate-800/40">
             {rowNum}
           </div>
 
@@ -62,19 +62,24 @@ const GameGrid: React.FC<GameGridProps> = ({ grid, phase, onCellClick }) => {
                 title={`${colLabel}${rowNum}`}
                 className={`
                   relative flex items-center justify-center 
-                  text-[0.55rem] sm:text-[0.7rem] md:text-[0.85rem] lg:text-[1rem] font-black rounded-[1px] border-[1px]
+                  text-[0.6rem] sm:text-[0.8rem] md:text-[0.9rem] lg:text-[1.1rem] font-black rounded-[1px] border-[1px]
                   transition-all duration-150 transform tracking-tight
                   h-full min-h-0 w-full
                   ${cellStyle}
-                  ${!cell.isFound && !isRevealed ? 'hover:bg-slate-700/30 hover:border-slate-500 hover:scale-[1.01] active:scale-95 z-10' : ''}
+                  ${!cell.isFound && !isRevealed ? 'hover:bg-slate-700/30 hover:border-emerald-500/30 hover:scale-[1.01] active:scale-95 z-10' : ''}
                 `}
               >
-                <span className="truncate w-full text-center px-0.5">{cell.value}</span>
+                {/* Micro Coordinate Label (Excel Corner Style) */}
+                <span className={`absolute top-0.5 left-0.5 text-[4px] sm:text-[6px] font-bold opacity-30 select-none pointer-events-none tracking-tighter ${cell.isFound ? 'text-emerald-400 opacity-60' : 'text-slate-500'}`}>
+                  {cell.id}
+                </span>
+
+                <span className="truncate w-full text-center px-0.5 font-mono">{cell.value}</span>
                 
                 {/* 5c indicator */}
                 {cell.isFound && (
                    <span className="absolute -top-1 -right-1 sm:-top-1.5 sm:-right-1.5 bg-emerald-500 text-white text-[4px] sm:text-[7px] px-0.5 sm:px-1 rounded-full shadow-[0_0_6px_rgba(16,185,129,0.5)] font-black z-20 animate-bounce">
-                     5c
+                     DET
                    </span>
                 )}
 
