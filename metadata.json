@@ -1,0 +1,5 @@
+{
+  "name": "Number Detective: Coordinate Pro",
+  "description": "A high-intensity visual perception game where you find anomalies in a dense coordinate-based grid. Features a 6x9 grid system, automated game loops, and a high-contrast dark mode aesthetic.",
+  "requestFramePermissions": []
+}
